@@ -1,0 +1,30 @@
+seed: 5
+data:
+  source: yahoo
+  ticker: BTC-USD
+  start: "2018-01-01"
+  end:   "2025-08-31"
+  interval: "1d"
+strategy:
+  name: ml_classifier
+  params:
+    model: log_reg
+    prob_threshold: 0.55
+    features:
+      r_lags: [1,2,3,5,10]
+      vol_lookback: 60
+      rsi_period: 14
+      sma_fast: 20
+      sma_slow: 100
+      donchian_lb: 55
+execution:
+  fees_bps: 10
+  slippage_bps: 5
+  target_vol_annual: 0.15
+  vol_lookback: 30
+  max_leverage: 2.0
+walkforward:
+  min_train: 730
+  test_size: 120
+output:
+  tag: "ml_lg"
