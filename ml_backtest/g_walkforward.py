@@ -27,7 +27,6 @@ from .c_metrics import summarise
 from .d_engine import backtest_t1
 from .e_features import build_feature_matrix
 from .e_orthogonalise import fit_scaler_on_train, transform_with_scaler, orthogonalise_on_base
-from .f_ml_pipelines import log_reg, fit_predict_proba
 from .f_model_policy import build_logit, fit_calibrated, predict_proba_both, tune_policy_on_train, policy_signals
 
 def rolling_windows(index, min_train: int, test_size: int):
@@ -57,6 +56,21 @@ def walkforward_run(config, df: pd.DataFrame, rng=None):
     min_train = int(config["walkforward"]["min_train"])
     test_size = int(config["walkforward"]["test_size"])
 
+    strategy_cfg = config["strategy"]
+    strat_params = strategy_cfg.get("params", {})
+    feature_params = strat_params.get("features", {})
+    exe = config["execution"]
+
+    X = build_feature_matrix(df, **feature_params)
+
+    adj_close = df["Adj Close"]
+    if isinstance(adj_close, pd.DataFrame):
+        adj_close = adj_close.iloc[:, 0]
+
+    next_ret = np.log(adj_close).diff().shift(-1)
+    y = pd.Series((next_ret > 0).astype(int), index=next_ret.index, name="y")
+    Xy = pd.concat([X, y], axis=1).dropna()
+
     folds = []
     oos_returns = []
     oos_positions = []
@@ -65,18 +79,16 @@ def walkforward_run(config, df: pd.DataFrame, rng=None):
     for ti, vi in rolling_windows(df.index, min_train=min_train, test_size=test_size):
         test = df.loc[vi]
 
-        p = config["strategy"]["params"]
-        X = build_feature_matrix(df, **p["features"])
-        exe = config["execution"]
-
-        y = (np.log(df["Adj Close"]).diff().shift(-1) > 0).astype(int)
-        if isinstance(y, pd.DataFrame):
-            y = y.iloc[:, 0]  # Get first column if DataFrame
-        y = pd.Series(y, name="y", index=y.index if hasattr(y, 'index') else X.index)
-        Xy = pd.concat([X, y], axis=1).dropna()
         train_idx = Xy.index.intersection(ti)
         test_idx  = Xy.index.intersection(vi)
+
+        if len(train_idx) < min_train or len(test_idx) == 0:
+            continue
+
         X_train, y_train = Xy.loc[train_idx].drop(columns=["y"]), Xy.loc[train_idx, "y"]
+        if y_train.nunique() < 2:
+            continue
+
         X_test  = Xy.loc[test_idx].drop(columns=["y"])
 
         # standardise on TRAIN only
@@ -92,31 +104,41 @@ def walkforward_run(config, df: pd.DataFrame, rng=None):
 
         # residualise RSI & Donchian on (trend, vol)
         targets = [c for c in X_train_s.columns if c not in base_cols]
-        X_train_o, X_test_o, betas = orthogonalise_on_base(X_train_s, X_test_s, base_cols, target_cols=targets)
+        X_train_o, X_test_o, _ = orthogonalise_on_base(X_train_s, X_test_s, base_cols, target_cols=targets)
 
         # MODEL + POLICY (TRAIN)
         clf_base = build_logit(C=0.5, penalty="l1", max_iter=500)
-        cal = fit_calibrated(clf_base, X_train_o, y_train, method=p["calibration"])  # e.g., "isotonic"
+        calibration_method = strat_params.get("calibration", "isotonic")
+        cal = fit_calibrated(clf_base, X_train_o, y_train, method=calibration_method)
         p_train, p_test = predict_proba_both(cal, X_train_o, X_test_o)
 
         # constraints + policy tuning on TRAIN
-        C = p["policy"]["constraints"]
-        thr_grid = np.arange(*p["policy"]["thr_grid"])   # e.g., [0.50, 0.70, 0.01]
-        min_hold_grid = p["policy"]["min_hold_grid"]     # e.g., [1, 3, 5]
+        policy_cfg = strat_params.get("policy", {})
+        C = policy_cfg.get("constraints", {})
+        thr_grid_cfg = policy_cfg.get("thr_grid", (0.50, 0.70, 0.01))
+        if isinstance(thr_grid_cfg, np.ndarray):
+            thr_grid_cfg = thr_grid_cfg.tolist()
+        if isinstance(thr_grid_cfg, (list, tuple)):
+            thr_grid = np.arange(*thr_grid_cfg)
+        else:
+            thr_grid = np.arange(0.50, 0.70, 0.01)
+        if thr_grid.size == 0:
+            thr_grid = np.arange(0.50, 0.70, 0.01)
+
+        min_hold_grid = policy_cfg.get("min_hold_grid", (1, 3, 5))
+        if isinstance(min_hold_grid, np.ndarray):
+            min_hold_grid = min_hold_grid.tolist()
+        if isinstance(min_hold_grid, (int, float)):
+            min_hold_grid = [int(min_hold_grid)]
+        if len(min_hold_grid) == 0:
+            min_hold_grid = [1]
         thr_star, mh_star, mtrain = tune_policy_on_train(
             p_train, df.loc[train_idx, "Adj Close"], exe, C,
             thr_grid=thr_grid, min_hold_grid=min_hold_grid)
 
         # APPLY POLICY (TEST)
         sig_test = policy_signals(p_test, thr_star, min_hold=mh_star)
-
-        # model = log_reg()
-        # proba = fit_predict_proba(model, X_train_o, y_train, X_test_o)
-        # thr = float(p.get("prob_threshold", 0.55))
-        # sig_test = pd.Series(0.0, index=test_idx)
-        # sig_test[proba > thr] = 1.0
-        # sig_test[proba < (1-thr)] = -1.0
-        
+        sig_test = sig_test.reindex(test.index, fill_value=0.0)
 
         bt_test = backtest_t1(test["Adj Close"], np.log(test["Adj Close"]).diff(), sig_test,
                               fees_bps=exe["fees_bps"],
@@ -125,13 +147,20 @@ def walkforward_run(config, df: pd.DataFrame, rng=None):
                               vol_lookback=exe["vol_lookback"],
                               max_leverage=exe["max_leverage"])
 
-        metrics = summarise(bt_test["pnl_net"], bt_test["pos"])
+        bt_test_clean = bt_test.dropna(subset=["pnl_net"])
+        if bt_test_clean.empty:
+            continue
+
+        metrics = summarise(bt_test_clean["pnl_net"], bt_test_clean["pos"])
         metrics["start"] = str(test.index[0].date())
         metrics["end"] = str(test.index[-1].date())
         folds.append(metrics)
-        oos_returns.append(bt_test["pnl_net"])
-        oos_positions.append(bt_test["pos"])
-        oos_equity_df.append(bt_test[["equity"]])
+        oos_returns.append(bt_test_clean["pnl_net"])
+        oos_positions.append(bt_test_clean["pos"])
+        oos_equity_df.append(bt_test_clean[["equity"]])
+
+    if not folds:
+        raise ValueError("Walkforward produced no valid folds; check config or data sufficiency.")
 
     folds_df = pd.DataFrame(folds)
     oos_ret = pd.concat(oos_returns).sort_index()
