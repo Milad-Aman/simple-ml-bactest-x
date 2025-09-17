@@ -8,7 +8,6 @@ data:
 strategy:
   name: ml_classifier
   params:
-    model: log_reg
     prob_threshold: 0.55
     features:
       r_lags: [1,2,3,5,10]
@@ -17,6 +16,16 @@ strategy:
       sma_fast: 20
       sma_slow: 100
       donchian_lb: 55
+    calibration: "isotonic"    # or "sigmoid"
+    policy:
+      constraints:
+        ann_return_log_min: 0.08
+        exposure_range: [0.20, 0.60]
+        turnover_max: 100.0
+        # sharpe_min: 0.90      # optional: enforce on TRAIN
+        # calmar_min: 1.30      # optional: enforce on TRAIN
+      thr_grid: [0.50, 0.70, 0.01]
+      min_hold_grid: [1, 3, 5]
 execution:
   fees_bps: 10
   slippage_bps: 5

@@ -38,11 +38,11 @@ def build_feature_matrix(
     """
     X = pd.DataFrame(index=df.index)
     r = np.log(df[price_col]).diff()
-    for L in r_lags:
-        X[f"r_lag_{L}"] = r.shift(L)
+    # for L in r_lags:
+    #     X[f"r_lag_{L}"] = r.shift(L)
     X[f"vol_{vol_lookback}"] = r.rolling(vol_lookback, min_periods=vol_lookback).std()
     X[f"rsi_{rsi_period}"] = rsi(df[price_col], rsi_period)
-    X[f"dist_sma_{sma_fast}"] = price_to_sma_distance(df[price_col], sma_fast)
+    # X[f"dist_sma_{sma_fast}"] = price_to_sma_distance(df[price_col], sma_fast)
     X[f"dist_sma_{sma_slow}"] = price_to_sma_distance(df[price_col], sma_slow)
     u,l,m = donchian(df["High"], df["Low"], lookback=donchian_lb)
     X[f"donch_pos"] = (df[price_col] - m) / (u - l).replace(0, np.nan)

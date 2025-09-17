@@ -23,10 +23,12 @@ fitting models and generating signals using only data within each fold.
 from __future__ import annotations
 import numpy as np
 import pandas as pd
+from .c_metrics import summarise
 from .d_engine import backtest_t1
 from .e_features import build_feature_matrix
+from .e_orthogonalise import fit_scaler_on_train, transform_with_scaler, orthogonalise_on_base
 from .f_ml_pipelines import log_reg, fit_predict_proba
-from .c_metrics import summarise
+from .f_model_policy import build_logit, fit_calibrated, predict_proba_both, tune_policy_on_train, policy_signals
 
 def rolling_windows(index, min_train: int, test_size: int):
 
@@ -65,6 +67,8 @@ def walkforward_run(config, df: pd.DataFrame, rng=None):
 
         p = config["strategy"]["params"]
         X = build_feature_matrix(df, **p["features"])
+        exe = config["execution"]
+
         y = (np.log(df["Adj Close"]).diff().shift(-1) > 0).astype(int)
         if isinstance(y, pd.DataFrame):
             y = y.iloc[:, 0]  # Get first column if DataFrame
@@ -74,15 +78,46 @@ def walkforward_run(config, df: pd.DataFrame, rng=None):
         test_idx  = Xy.index.intersection(vi)
         X_train, y_train = Xy.loc[train_idx].drop(columns=["y"]), Xy.loc[train_idx, "y"]
         X_test  = Xy.loc[test_idx].drop(columns=["y"])
-        model = log_reg()
-        proba = fit_predict_proba(model, X_train, y_train, X_test)
-        thr = float(p.get("prob_threshold", 0.55))
-        sig_test = pd.Series(0.0, index=test_idx)
-        sig_test[proba > thr] = 1.0
-        sig_test[proba < (1-thr)] = -1.0
+
+        # standardise on TRAIN only
+        scaler, X_train_s = fit_scaler_on_train(X_train)
+        X_test_s = transform_with_scaler(X_test, scaler)
+
+        # choose base columns programmatically (robust to parameter names)
+        base_cols = []
+        base_cols += [c for c in X_train_s.columns if c.startswith("dist_sma_")]  # trend base (e.g., dist_sma_100)
+        base_cols += [c for c in X_train_s.columns if c.startswith("vol_")]       # vol base (e.g., vol_20)
+        # keep just one of each if you ever add more:
+        base_cols = list(dict.fromkeys(base_cols))[:2]
+
+        # residualise RSI & Donchian on (trend, vol)
+        targets = [c for c in X_train_s.columns if c not in base_cols]
+        X_train_o, X_test_o, betas = orthogonalise_on_base(X_train_s, X_test_s, base_cols, target_cols=targets)
+
+        # MODEL + POLICY (TRAIN)
+        clf_base = build_logit(C=0.5, penalty="l1", max_iter=500)
+        cal = fit_calibrated(clf_base, X_train_o, y_train, method=p["calibration"])  # e.g., "isotonic"
+        p_train, p_test = predict_proba_both(cal, X_train_o, X_test_o)
+
+        # constraints + policy tuning on TRAIN
+        C = p["policy"]["constraints"]
+        thr_grid = np.arange(*p["policy"]["thr_grid"])   # e.g., [0.50, 0.70, 0.01]
+        min_hold_grid = p["policy"]["min_hold_grid"]     # e.g., [1, 3, 5]
+        thr_star, mh_star, mtrain = tune_policy_on_train(
+            p_train, df.loc[train_idx, "Adj Close"], exe, C,
+            thr_grid=thr_grid, min_hold_grid=min_hold_grid)
+
+        # APPLY POLICY (TEST)
+        sig_test = policy_signals(p_test, thr_star, min_hold=mh_star)
+
+        # model = log_reg()
+        # proba = fit_predict_proba(model, X_train_o, y_train, X_test_o)
+        # thr = float(p.get("prob_threshold", 0.55))
+        # sig_test = pd.Series(0.0, index=test_idx)
+        # sig_test[proba > thr] = 1.0
+        # sig_test[proba < (1-thr)] = -1.0
         
 
-        exe = config["execution"]
         bt_test = backtest_t1(test["Adj Close"], np.log(test["Adj Close"]).diff(), sig_test,
                               fees_bps=exe["fees_bps"],
                               slippage_bps=exe["slippage_bps"],

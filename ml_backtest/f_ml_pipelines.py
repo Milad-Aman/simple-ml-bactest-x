@@ -27,3 +27,4 @@ def fit_predict_proba(model, X_train: pd.DataFrame, y_train: pd.Series, X_test: 
     """Fit model on (X_train, y_train) and return class-1 probabilities for X_test."""
     model.fit(X_train, y_train)
     return model.predict_proba(X_test)[:,1]
+
