@@ -15,7 +15,7 @@ import argparse, os, yaml, json
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from .a_data_loader import load_yahoo, load_csv, add_log_returns
+from .a_data_loader import load_data
 from .g_walkforward import walkforward_run
 from .c_metrics import summarise
 from .h_mc_permutation import mc_permutation_pvalue
@@ -34,30 +34,6 @@ def parse_args():
     ap.add_argument("--config", required=True, help="Path to YAML config")
     ap.add_argument("--seed", type=int, default=None)
     return ap.parse_args()
-
-def load_data(cfg):
-    """
-    Load and prepare price data according to the config.
-
-    Expects:
-        cfg["data"]["source"]: "yahoo" or "csv".
-        If "yahoo": requires keys: "ticker", "start", "end"; optional: "interval" (default "1d").
-        If "csv": requires key: "path" (str).
-
-    Returns:
-        pandas.DataFrame: Price data with additional log-return columns via `add_log_returns`.
-
-    Raises:
-        ValueError: If the data source is unknown.
-    """
-    src = cfg["data"]["source"]
-    if src == "yahoo":
-        df = load_yahoo(cfg["data"]["ticker"], cfg["data"]["start"], cfg["data"]["end"], cfg["data"].get("interval","1d"))
-    elif src == "csv":
-        df = load_csv(cfg["data"]["path"])
-    else:
-        raise ValueError("Unknown data source")
-    return add_log_returns(df)
 
 def main():
     """
